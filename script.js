@@ -1,3 +1,4 @@
+
 import * as THREE from "https://cdn.skypack.dev/three@0.150.1";
 import { OrbitControls } from "https://cdn.skypack.dev/three@0.150.1/examples/jsm/controls/OrbitControls";
 import { GLTFLoader } from "https://cdn.skypack.dev/three@0.150.1/examples/jsm/loaders/GLTFLoader";
@@ -80,3 +81,194 @@ class BasicScene {
         requestAnimationFrame((t) => this.render(t));
     }
 }
+class Avatar {
+    constructor(url, scene) {
+        this.loader = new GLTFLoader();
+        this.morphTargetMeshes = [];
+        this.url = url;
+        this.scene = scene;
+        this.loadModel(this.url);
+    }
+    loadModel(url) {
+        this.url = url;
+        this.loader.load(
+        url, 
+        (gltf) => {
+            if (this.gltf) {
+    
+                this.gltf.scene.remove();
+                this.morphTargetMeshes = [];
+            }
+            this.gltf = gltf;
+            console.log();
+            this.scene.add(gltf.scene);
+            this.init(gltf);
+        }, 
+        
+        (progress) => console.log("Loading model...", 100.0 * (progress.loaded / progress.total), "%"), 
+        
+        (error) => console.error(error));
+    }
+    init(gltf) {
+        gltf.scene.traverse((object) => {
+            
+            if (object.isBone && !this.root) {
+                this.root = object;
+                console.log(object);
+            }
+            
+            if (!object.isMesh) {
+                
+                return;
+            }
+            const mesh = object;
+            
+            mesh.frustumCulled = false;
+            
+            if (!mesh.morphTargetDictionary || !mesh.morphTargetInfluences) {
+                
+                return;
+            }
+            this.morphTargetMeshes.push(mesh);
+        });
+    }
+    updateBlendshapes(blendshapes) {
+        for (const mesh of this.morphTargetMeshes) {
+            if (!mesh.morphTargetDictionary || !mesh.morphTargetInfluences) {
+               
+                continue;
+            }
+            for (const [name, value] of blendshapes) {
+                if (!Object.keys(mesh.morphTargetDictionary).includes(name)) {
+                   
+                    continue;
+                }
+                const idx = mesh.morphTargetDictionary[name];
+                mesh.morphTargetInfluences[idx] = value;
+            }
+        }
+    }
+    /**
+     * Apply a position, rotation, scale matrix to current GLTF.scene
+     * @param matrix
+     * @param matrixRetargetOptions
+     * @returns
+     */
+    applyMatrix(matrix, matrixRetargetOptions) {
+        const { decompose = false, scale = 1 } = matrixRetargetOptions || {};
+        if (!this.gltf) {
+            return;
+        }
+        
+        matrix.scale(new THREE.Vector3(scale, scale, scale));
+        this.gltf.scene.matrixAutoUpdate = false;
+        this.gltf.scene.matrix.copy(matrix);
+    }
+    /**
+     * Takes the root object in the avatar and offsets its position for retargetting.
+     * @param offset
+     * @param rotation
+     */
+    offsetRoot(offset, rotation) {
+        if (this.root) {
+            this.root.position.copy(offset);
+            if (rotation) {
+                let offsetQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(rotation.x, rotation.y, rotation.z));
+                this.root.quaternion.copy(offsetQuat);
+            }
+        }
+    }
+}
+let faceLandmarker;
+let video;
+const scene = new BasicScene();
+const avatar = new Avatar("https://assets.codepen.io/9177687/raccoon_head.glb", scene.scene);
+function detectFaceLandmarks(time) {
+    if (!faceLandmarker) {
+        return;
+    }
+    const landmarks = faceLandmarker.detectForVideo(video, time);
+    
+    const transformationMatrices = landmarks.facialTransformationMatrixes;
+    if (transformationMatrices && transformationMatrices.length > 0) {
+        let matrix = new THREE.Matrix4().fromArray(transformationMatrices[0].data);
+        
+        avatar.applyMatrix(matrix, { scale: 40 });
+    }
+    
+    const blendshapes = landmarks.faceBlendshapes;
+    if (blendshapes && blendshapes.length > 0) {
+        const coefsMap = retarget(blendshapes);
+        avatar.updateBlendshapes(coefsMap);
+    }
+}
+function retarget(blendshapes) {
+    const categories = blendshapes[0].categories;
+    let coefsMap = new Map();
+    for (let i = 0; i < categories.length; ++i) {
+        const blendshape = categories[i];
+        
+        switch (blendshape.categoryName) {
+            case "browOuterUpLeft":
+                blendshape.score *= 1.2;
+                break;
+            case "browOuterUpRight":
+                blendshape.score *= 1.2;
+                break;
+            case "eyeBlinkLeft":
+                blendshape.score *= 1.2;
+                break;
+            case "eyeBlinkRight":
+                blendshape.score *= 1.2;
+                break;
+            default:
+        }
+        coefsMap.set(categories[i].categoryName, categories[i].score);
+    }
+    return coefsMap;
+}
+function onVideoFrame(time) {
+   
+    detectFaceLandmarks(time);
+    video.requestVideoFrameCallback(onVideoFrame);
+}
+
+async function streamWebcamThroughFaceLandmarker() {
+    video = document.getElementById("video");
+    function onAcquiredUserMedia(stream) {
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            video.play();
+        };
+    }
+    try {
+        const evt = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+                facingMode: "user",
+                width: 1280,
+                height: 720
+            }
+        });
+        onAcquiredUserMedia(evt);
+        video.requestVideoFrameCallback(onVideoFrame);
+    }
+    catch (e) {
+        console.error(`Failed to acquire camera feed: ${e}`);
+    }
+}
+async function runDemo() {
+    await streamWebcamThroughFaceLandmarker();
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.1.0-alpha-16/wasm");
+    faceLandmarker = await FaceLandmarker.createFromModelPath(vision, "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task");
+    await faceLandmarker.setOptions({
+        baseOptions: {
+            delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: true
+    });
+    console.log("Finished Loading MediaPipe Model.");
+}
+runDemo();
